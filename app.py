@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -43,9 +44,11 @@ class SupertonicChunkedStream(tts.ChunkedStream):
 
     async def _run(self, output_emitter) -> None:
         loop = asyncio.get_event_loop()
+        t0 = time.perf_counter()
         wav, duration = await loop.run_in_executor(
             None, self._synthesize_sync, self._input_text
         )
+        print(f"[TIMER] TTS synthesis: {time.perf_counter() - t0:.2f}s", flush=True)
 
         audio_f32 = wav.squeeze()
         audio_resampled = resample_poly(audio_f32, up=80, down=147).astype(np.float32)
@@ -111,16 +114,20 @@ Keep answers short since the user is listening, not reading.
             llm=openai.LLM(model="gpt-4o-mini"),
             tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.05),
         )
+        self._t_user_turn: float = 0.0
 
     async def on_enter(self):
         await self.session.say("Hello! I'm your voice assistant. Go ahead and speak.")
 
     async def on_user_turn_completed(self, turn_ctx, new_message):
-        print(f"\n[STT] {new_message.text_content}\n", flush=True)
+        self._t_user_turn = time.perf_counter()
+        print(f"\n[STT] {new_message.text_content}", flush=True)
         await super().on_user_turn_completed(turn_ctx, new_message)
 
     async def on_agent_turn_completed(self, turn_ctx, new_message):
-        print(f"[TTS] {new_message.text_content}\n", flush=True)
+        llm_ms = (time.perf_counter() - self._t_user_turn) * 1000
+        print(f"[TIMER] STT→LLM→TTS pipeline: {llm_ms:.0f}ms", flush=True)
+        print(f"[LLM]  {new_message.text_content}\n", flush=True)
         await super().on_agent_turn_completed(turn_ctx, new_message)
 
 

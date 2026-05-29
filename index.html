@@ -172,6 +172,7 @@ const audioSink = document.getElementById("audio-sink");
 
 let room = null;
 let connected = false;
+let tUserStopped = 0;  // timestamp when local user last stopped speaking
 
 // ── Toggle popup on bubble click ────────────────────────────────────────────
 bubble.addEventListener("click", () => {
@@ -205,7 +206,16 @@ btnGo.addEventListener("click", async () => {
   room = new Room();
 
   room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+    const localTalking = speakers.some(s => s === room.localParticipant);
     const agentTalking = speakers.some(s => s instanceof RemoteParticipant);
+
+    if (!localTalking && tUserStopped === 0) {
+      tUserStopped = performance.now();
+    }
+    if (localTalking) {
+      tUserStopped = 0;  // reset if user speaks again
+    }
+
     bubble.className = agentTalking ? "speaking" : (connected ? "listening" : "");
   });
 
@@ -216,6 +226,11 @@ btnGo.addEventListener("click", async () => {
   room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
     dbg("Track subscribed: " + track.kind + " from " + participant.identity, "ok");
     if (track.kind === Track.Kind.Audio) {
+      if (tUserStopped > 0) {
+        const rtt = ((performance.now() - tUserStopped) / 1000).toFixed(2);
+        dbg(`[TIMER] End-to-end latency: ${rtt}s`, "ok");
+        tUserStopped = 0;
+      }
       const el = track.attach();
       el.autoplay = true;
       audioSink.appendChild(el);
