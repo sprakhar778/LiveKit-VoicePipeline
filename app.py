@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -19,8 +20,7 @@ from supertonic import TTS as SupertonicEngine
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
-
+from langchain.tools import tool
 load_dotenv()
 logger = logging.getLogger("voice-agent")
 logger.setLevel(logging.INFO)
@@ -28,6 +28,22 @@ logger.setLevel(logging.INFO)
 SUPERTONIC_NATIVE_RATE = 44_100
 LIVEKIT_SAMPLE_RATE    = 24_000
 LIVEKIT_CHANNELS       = 1
+
+
+def split_clauses(text: str) -> list[str]:
+    """Split text at sentence and comma boundaries so each clause stays under 300 chars (1 Supertonic chunk)."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    result = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if len(s) > 200:
+            parts = re.split(r'(?<=[,;])\s+', s)
+            result.extend(p.strip() for p in parts if p.strip())
+        else:
+            result.append(s)
+    return result or [text.strip()]
 
 
 # ─── Local TTS: Supertonic ────────────────────────────────────────────────────
@@ -49,26 +65,29 @@ class SupertonicChunkedStream(tts.ChunkedStream):
 
     async def _run(self, output_emitter) -> None:
         loop = asyncio.get_event_loop()
-        t0 = time.perf_counter()
-        wav, duration = await loop.run_in_executor(
-            None, self._synthesize_sync, self._input_text
-        )
-        print(f"[TIMER] TTS synthesis: {time.perf_counter() - t0:.2f}s", flush=True)
+        clauses = split_clauses(self._input_text)
+        print(f"  [TTS] {len(clauses)} clause(s): {self._input_text!r}", flush=True)
 
-        audio_f32 = wav.squeeze()
-        audio_resampled = resample_poly(audio_f32, up=80, down=147).astype(np.float32)
-        audio_int16 = (audio_resampled * 32767).clip(-32768, 32767).astype(np.int16)
-
+        seg_id = uuid.uuid4().hex
         output_emitter.initialize(
-            request_id=uuid.uuid4().hex,
+            request_id=seg_id,
             sample_rate=LIVEKIT_SAMPLE_RATE,
             num_channels=LIVEKIT_CHANNELS,
             mime_type="audio/pcm",
-            stream=False,
+            stream=True,
         )
-        output_emitter.push(audio_int16.tobytes())
+        output_emitter.start_segment(segment_id=seg_id)
+
+        async with self._tts._sem:
+            for i, clause in enumerate(clauses, 1):
+                t0 = time.perf_counter()
+                wav, dur = await loop.run_in_executor(None, self._synthesize_sync, clause)
+                elapsed = time.perf_counter() - t0
+                print(f"  [TTS] {i}/{len(clauses)} {elapsed:.2f}s → {dur[0]:.2f}s audio", flush=True)
+                audio = (resample_poly(wav.squeeze(), 80, 147) * 32767).clip(-32768, 32767).astype(np.int16)
+                output_emitter.push(audio.tobytes())
+
         output_emitter.flush()
-        logger.debug("Supertonic synthesised %.2fs of audio", duration[0])
 
     def _synthesize_sync(self, text: str):
         engine = self._tts._engine
@@ -92,6 +111,7 @@ class SupertonicTTS(tts.TTS):
             num_channels=LIVEKIT_CHANNELS,
         )
         self._opts = SupertonicTTSOptions(voice_name=voice_name, lang=lang, total_steps=total_steps, speed=speed)
+        self._sem = asyncio.Semaphore(1)
         logger.info("Loading Supertonic3 model…")
         self._engine = SupertonicEngine(auto_download=True)
         logger.info("Supertonic3 model loaded")
@@ -108,7 +128,9 @@ class SupertonicTTS(tts.TTS):
 def get_data():
     """Get the current device/project data."""
     return """
-Project Name: DHF Autonomous Inspection System
+Project Name: Misso 
+
+robotic System
 
 Client: Meril Life Sciences
 Device ID: DHF-RBT-042
@@ -131,9 +153,8 @@ The robotics team completed indoor mapping tests in the manufacturing unit. The 
 """
 
 agent_graph = create_agent(
-
-    system_prompt="Use get data tool if ask for device data or what you are working"+PROMPT,
-    model=ChatOpenAI(model="gpt-4.1-mini", temperature=0.7),
+    system_prompt=PROMPT + "\nUse get_data tool when asked about the current device or project. Keep all answers under 3 sentences — this is a voice interface.",
+    model=ChatOpenAI(model="gpt-4o-mini", temperature=0.7, max_tokens=80),
     tools=[get_data],
 )
 
@@ -146,7 +167,7 @@ class VoiceAgent(Agent):
             stt=openai.STT(model="whisper-1"),
             # llm=openai.LLM(model="gpt-4o-mini"),
             llm=langchain.LLMAdapter(agent_graph),
-            tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.05),
+            tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.1),
         )
         self._t_user_turn: float = 0.0
 
