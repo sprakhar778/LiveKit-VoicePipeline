@@ -188,7 +188,23 @@ class VoiceAgent(Agent):
 
 async def entrypoint(ctx: JobContext):
     logger.info("User connected to room: %s", ctx.room.name)
-    session = AgentSession(vad=silero.VAD.load())
+    vad = silero.VAD.load(
+        activation_threshold=0.5,    # start speech above this confidence
+        deactivation_threshold=0.35, # end speech below this confidence
+        min_speech_duration=0.1,     # ignore blips shorter than 100ms
+        min_silence_duration=0.8,    # wait 800ms of silence before ending turn
+        prefix_padding_duration=0.3, # keep 300ms before detected speech onset
+    )
+    session = AgentSession(
+        vad=vad,
+        turn_handling={
+            "turn_detection": "vad",
+            "endpointing": {
+                "min_delay": 0.5,  # wait at least 500ms after VAD silence before STT
+                "max_delay": 2.0,  # give slow speakers up to 2s
+            },
+        },
+    )
     await session.start(agent=VoiceAgent(), room=ctx.room)
 
 
