@@ -8,13 +8,18 @@ from dataclasses import dataclass
 from prompt import PROMPT
 import numpy as np
 from scipy.signal import resample_poly
-
+from livekit.plugins import langchain
 from dotenv import load_dotenv
 from livekit.agents import JobContext, WorkerOptions, cli, APIConnectOptions, tts
 from livekit.agents.voice import Agent, AgentSession
 from livekit.plugins import openai, silero
 
 from supertonic import TTS as SupertonicEngine
+
+
+from langchain.agents import create_agent
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import tool
 
 load_dotenv()
 logger = logging.getLogger("voice-agent")
@@ -98,7 +103,39 @@ class SupertonicTTS(tts.TTS):
             opts=self._opts,
             conn_options=conn_options,
         )
+#-------------------LLM---------------------------------------------------------
+@tool
+def get_data():
+    """Get the current device/project data."""
+    return """
+Project Name: DHF Autonomous Inspection System
 
+Client: Meril Life Sciences
+Device ID: DHF-RBT-042
+Status: Active Development
+
+Current Tasks:
+- Integrating LiDAR-based navigation
+- Optimizing voice command pipeline
+- Testing obstacle avoidance module
+- Improving battery monitoring dashboard
+
+Recent Metrics:
+- Uptime: 98.7%
+- Battery Health: 94%
+- Navigation Accuracy: 96.2%
+- Voice Command Success Rate: 92.8%
+
+Last Update:
+The robotics team completed indoor mapping tests in the manufacturing unit. The system successfully navigated 1.8 km of test routes and identified 37 simulated obstacles with a 96% detection rate.
+"""
+
+agent_graph = create_agent(
+
+    system_prompt="Use get data tool if ask for device data or what you are working"+PROMPT,
+    model=ChatOpenAI(model="gpt-4.1-mini", temperature=0.7),
+    tools=[get_data],
+)
 
 # ─--── Agent ────────────────────────────────────────────────────────────────────
 
@@ -107,7 +144,8 @@ class VoiceAgent(Agent):
         super().__init__(
             instructions=PROMPT,
             stt=openai.STT(model="whisper-1"),
-            llm=openai.LLM(model="gpt-4o-mini"),
+            # llm=openai.LLM(model="gpt-4o-mini"),
+            llm=langchain.LLMAdapter(agent_graph),
             tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.05),
         )
         self._t_user_turn: float = 0.0
