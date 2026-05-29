@@ -260,6 +260,9 @@ btnGo.addEventListener("click", async () => {
     btnDisco.style.display = "block";
     setStatus("Enabling microphone…");
     dbg("Requesting mic…");
+    if (!navigator.mediaDevices) {
+      throw new Error("Mic blocked — open via http://localhost:" + location.port + " (not IP address). Browsers require HTTPS or localhost for microphone.");
+    }
     await room.localParticipant.setMicrophoneEnabled(true);
     dbg("Mic enabled ✓", "ok");
     setStatus("Connected — speak now", "active");

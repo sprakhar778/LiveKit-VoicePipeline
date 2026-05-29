@@ -1,135 +1,93 @@
-# from __future__ import annotations
+from __future__ import annotations
 
-# import asyncio
-# import logging
-# import uuid
-# from dataclasses import dataclass
+import asyncio
+import os
+from contextlib import asynccontextmanager
 
-# import numpy as np
-# from scipy.signal import resample_poly
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from livekit import api as lkapi
 
-# from dotenv import load_dotenv
-# from livekit.agents import JobContext, WorkerOptions, cli, APIConnectOptions, tts
-# from livekit.agents.voice import Agent, AgentSession
-# from livekit.plugins import openai, silero
+from app import agent_server
 
-# from supertonic import TTS as SupertonicEngine
+load_dotenv()
 
-# load_dotenv()
-# logger = logging.getLogger("voice-agent")
-# logger.setLevel(logging.INFO)
-
-# SUPERTONIC_NATIVE_RATE = 44_100
-# LIVEKIT_SAMPLE_RATE    = 24_000
-# LIVEKIT_CHANNELS       = 1
+API_KEY     = os.environ["LIVEKIT_API_KEY"]
+API_SECRET  = os.environ["LIVEKIT_API_SECRET"]
+LIVEKIT_URL = os.environ["LIVEKIT_URL"]
+ROOM_NAME   = os.getenv("LIVEKIT_ROOM", "my-room")
 
 
-# # ─── Local TTS: Supertonic ────────────────────────────────────────────────────
-
-# @dataclass
-# class SupertonicTTSOptions:
-#     voice_name  : str   = "M2"
-#     lang        : str   = "en"
-#     total_steps : int   = 8
-#     speed       : float = 1.05
-
-
-# class SupertonicChunkedStream(tts.ChunkedStream):
-
-#     def __init__(self, *, tts_instance: "SupertonicTTS", input_text: str, opts: SupertonicTTSOptions, conn_options: APIConnectOptions) -> None:
-#         super().__init__(tts=tts_instance, input_text=input_text, conn_options=conn_options)
-#         self._opts = opts
-#         self._tts  = tts_instance
-
-#     async def _run(self, output_emitter) -> None:
-#         loop = asyncio.get_event_loop()
-#         wav, duration = await loop.run_in_executor(
-#             None, self._synthesize_sync, self._input_text
-#         )
-
-#         audio_f32 = wav.squeeze()
-#         audio_resampled = resample_poly(audio_f32, up=80, down=147).astype(np.float32)
-#         audio_int16 = (audio_resampled * 32767).clip(-32768, 32767).astype(np.int16)
-
-#         output_emitter.initialize(
-#             request_id=uuid.uuid4().hex,
-#             sample_rate=LIVEKIT_SAMPLE_RATE,
-#             num_channels=LIVEKIT_CHANNELS,
-#             mime_type="audio/pcm",
-#             stream=False,
-#         )
-#         output_emitter.push(audio_int16.tobytes())
-#         output_emitter.flush()
-#         logger.debug("Supertonic synthesised %.2fs of audio", duration[0])
-
-#     def _synthesize_sync(self, text: str):
-#         engine = self._tts._engine
-#         style  = engine.get_voice_style(voice_name=self._opts.voice_name)
-#         wav, duration = engine.synthesize(
-#             text=text,
-#             lang=self._opts.lang,
-#             voice_style=style,
-#             total_steps=self._opts.total_steps,
-#             speed=self._opts.speed,
-#         )
-#         return wav, duration
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("[startup] starting agent worker…", flush=True)
+    task = asyncio.create_task(agent_server.run(devmode=True))
+    print("[startup] agent worker running", flush=True)
+    yield
+    print("[shutdown] stopping agent worker…", flush=True)
+    task.cancel()
+    await agent_server.aclose()
 
 
-# class SupertonicTTS(tts.TTS):
-
-#     def __init__(self, *, voice_name: str = "M2", lang: str = "en", total_steps: int = 8, speed: float = 1.05) -> None:
-#         super().__init__(
-#             capabilities=tts.TTSCapabilities(streaming=False),
-#             sample_rate=LIVEKIT_SAMPLE_RATE,
-#             num_channels=LIVEKIT_CHANNELS,
-#         )
-#         self._opts = SupertonicTTSOptions(voice_name=voice_name, lang=lang, total_steps=total_steps, speed=speed)
-#         logger.info("Loading Supertonic3 model…")
-#         self._engine = SupertonicEngine(auto_download=True)
-#         logger.info("Supertonic3 model loaded")
-
-#     def synthesize(self, text: str, *, conn_options: APIConnectOptions) -> SupertonicChunkedStream:
-#         print(text)
-#         return SupertonicChunkedStream(
-#             tts_instance=self,
-#             input_text=text,
-#             opts=self._opts,
-#             conn_options=conn_options,
-#         )
+app = FastAPI(lifespan=lifespan)
 
 
-# # ─── Agent ────────────────────────────────────────────────────────────────────
-
-# class VoiceAgent(Agent):
-#     def __init__(self) -> None:
-#         super().__init__(
-#             instructions="""
-# You are a helpful voice assistant.
-# Be friendly and conversational.
-# Keep answers short since the user is listening, not reading.
-#             """,
-#             stt=openai.STT(model="whisper-1"),
-#             llm=openai.LLM(model="gpt-4o-mini"),
-#             tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.05),
-#         )
-
-#     async def on_enter(self):
-#         self.session.generate_reply()
-
-#     async def on_user_turn_completed(self, turn_ctx, new_message):
-#         logger.info(">>> STT heard: %r", new_message.text_content)
-#         await super().on_user_turn_completed(turn_ctx, new_message)
-
-#     async def on_agent_turn_completed(self, turn_ctx, new_message):
-#         logger.info(">>> LLM replied: %r", new_message.text_content)
-#         await super().on_agent_turn_completed(turn_ctx, new_message)
+def make_token() -> str:
+    return (
+        lkapi.AccessToken(api_key=API_KEY, api_secret=API_SECRET)
+        .with_identity("user1")
+        .with_name("User")
+        .with_grants(lkapi.VideoGrants(room_join=True, room=ROOM_NAME))
+        .to_jwt()
+    )
 
 
-# async def entrypoint(ctx: JobContext):
-#     logger.info("User connected to room: %s", ctx.room.name)
-#     session = AgentSession(vad=silero.VAD.load())
-#     await session.start(agent=VoiceAgent(), room=ctx.room)
+async def dispatch_agent() -> None:
+    async with lkapi.LiveKitAPI(url=LIVEKIT_URL, api_key=API_KEY, api_secret=API_SECRET) as lk:
+        try:
+            resp = await lk.room.list_participants(lkapi.ListParticipantsRequest(room=ROOM_NAME))
+            if any(p.kind == 4 for p in resp.participants):
+                print("[dispatch] agent already in room, skipping")
+                return
+        except Exception as e:
+            print(f"[dispatch] list_participants: {e}")
+
+        try:
+            existing = await lk.agent_dispatch.list_dispatch(lkapi.ListAgentDispatchRequest(room=ROOM_NAME))
+            if existing.agent_dispatches:
+                print("[dispatch] pending dispatch found, skipping")
+                return
+        except Exception as e:
+            print(f"[dispatch] list_dispatch: {e}")
+
+        await lk.agent_dispatch.create_dispatch(lkapi.CreateAgentDispatchRequest(agent_name="voice-agent", room=ROOM_NAME))
+        print(f"[dispatch] agent dispatched to '{ROOM_NAME}'")
 
 
-# if __name__ == "__main__":
-#     cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+@app.get("/token")
+async def get_token():
+    print(f"\n[/token] browser connected → room '{ROOM_NAME}'", flush=True)
+    try:
+        await dispatch_agent()
+    except Exception as e:
+        import traceback
+        print(f"[/token] dispatch failed: {e}", flush=True)
+        traceback.print_exc()
+    token = make_token()
+    print(f"[/token] JWT issued for user1", flush=True)
+    return {"url": LIVEKIT_URL, "token": token}
+
+
+@app.get("/health")
+async def health():
+    print("[/health] ping", flush=True)
+    return {"status": "ok"}
+
+
+app.mount("/", StaticFiles(directory=".", html=True), name="static")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=False)

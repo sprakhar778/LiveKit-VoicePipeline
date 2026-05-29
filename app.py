@@ -7,21 +7,29 @@ import time
 import uuid
 from dataclasses import dataclass
 from prompt import PROMPT
+
 import numpy as np
 from scipy.signal import resample_poly
-from livekit.plugins import langchain
 from dotenv import load_dotenv
+
 from livekit.agents import JobContext, WorkerOptions, cli, APIConnectOptions, tts
+from livekit.agents.worker import AgentServer
 from livekit.agents.voice import Agent, AgentSession
-from livekit.plugins import openai, silero
-
-from supertonic import TTS as SupertonicEngine
-
+from livekit.plugins import openai, silero, langchain
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
+
+from supertonic import TTS as SupertonicEngine
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Config
+# ──────────────────────────────────────────────────────────────────────────────
+
 load_dotenv()
+
 logger = logging.getLogger("voice-agent")
 logger.setLevel(logging.INFO)
 
@@ -29,6 +37,9 @@ SUPERTONIC_NATIVE_RATE = 44_100
 LIVEKIT_SAMPLE_RATE    = 24_000
 LIVEKIT_CHANNELS       = 1
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Text utilities
+# ──────────────────────────────────────────────────────────────────────────────
 
 def split_clauses(text: str) -> list[str]:
     """Split text at sentence and comma boundaries so each clause stays under 300 chars (1 Supertonic chunk)."""
@@ -45,8 +56,9 @@ def split_clauses(text: str) -> list[str]:
             result.append(s)
     return result or [text.strip()]
 
-
-# ─── Local TTS: Supertonic ────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# TTS — Supertonic
+# ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class SupertonicTTSOptions:
@@ -64,7 +76,7 @@ class SupertonicChunkedStream(tts.ChunkedStream):
         self._tts  = tts_instance
 
     async def _run(self, output_emitter) -> None:
-        loop = asyncio.get_event_loop()
+        loop    = asyncio.get_event_loop()
         clauses = split_clauses(self._input_text)
         print(f"  [TTS] {len(clauses)} clause(s): {self._input_text!r}", flush=True)
 
@@ -82,7 +94,7 @@ class SupertonicChunkedStream(tts.ChunkedStream):
             for i, clause in enumerate(clauses, 1):
                 t0 = time.perf_counter()
                 wav, dur = await loop.run_in_executor(None, self._synthesize_sync, clause)
-                elapsed = time.perf_counter() - t0
+                elapsed  = time.perf_counter() - t0
                 print(f"  [TTS] {i}/{len(clauses)} {elapsed:.2f}s → {dur[0]:.2f}s audio", flush=True)
                 audio = (resample_poly(wav.squeeze(), 80, 147) * 32767).clip(-32768, 32767).astype(np.int16)
                 output_emitter.push(audio.tobytes())
@@ -110,8 +122,8 @@ class SupertonicTTS(tts.TTS):
             sample_rate=LIVEKIT_SAMPLE_RATE,
             num_channels=LIVEKIT_CHANNELS,
         )
-        self._opts = SupertonicTTSOptions(voice_name=voice_name, lang=lang, total_steps=total_steps, speed=speed)
-        self._sem = asyncio.Semaphore(1)
+        self._opts   = SupertonicTTSOptions(voice_name=voice_name, lang=lang, total_steps=total_steps, speed=speed)
+        self._sem    = asyncio.Semaphore(1)
         logger.info("Loading Supertonic3 model…")
         self._engine = SupertonicEngine(auto_download=True)
         logger.info("Supertonic3 model loaded")
@@ -123,15 +135,16 @@ class SupertonicTTS(tts.TTS):
             opts=self._opts,
             conn_options=conn_options,
         )
-#-------------------LLM---------------------------------------------------------
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LLM — LangChain agent + tools
+# ──────────────────────────────────────────────────────────────────────────────
+
 @tool
 def get_data():
     """Get the current device/project data."""
     return """
-Project Name: Misso 
-
-robotic System
-
+Project Name: Misso Robotic System
 Client: Meril Life Sciences
 Device ID: DHF-RBT-042
 Status: Active Development
@@ -149,23 +162,44 @@ Recent Metrics:
 - Voice Command Success Rate: 92.8%
 
 Last Update:
-The robotics team completed indoor mapping tests in the manufacturing unit. The system successfully navigated 1.8 km of test routes and identified 37 simulated obstacles with a 96% detection rate.
+The robotics team completed indoor mapping tests in the manufacturing unit.
+The system successfully navigated 1.8 km of test routes and identified
+37 simulated obstacles with a 96% detection rate.
 """
 
+
 agent_graph = create_agent(
-    system_prompt=PROMPT + "\nUse get_data tool when asked about the current device or project. Keep all answers under 3 sentences — this is a voice interface.",
+    system_prompt=(
+        PROMPT
+        + "\nUse get_data tool when asked about the current device or project."
+        + " Keep all answers under 3 sentences — this is a voice interface."
+    ),
     model=ChatOpenAI(model="gpt-4o-mini", temperature=0.7, max_tokens=80),
     tools=[get_data],
 )
 
-# ─--── Agent ────────────────────────────────────────────────────────────────────
+_raw_astream = agent_graph.astream
+
+async def _filtered_astream(*args, **kwargs):
+    async for item in _raw_astream(*args, **kwargs):
+        if isinstance(item, tuple) and isinstance(item[0], ToolMessage):
+            continue
+        if isinstance(item, ToolMessage):
+            continue
+        yield item
+
+agent_graph.astream = _filtered_astream
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Voice agent
+# ──────────────────────────────────────────────────────────────────────────────
 
 class VoiceAgent(Agent):
+
     def __init__(self) -> None:
         super().__init__(
             instructions=PROMPT,
             stt=openai.STT(model="whisper-1"),
-            # llm=openai.LLM(model="gpt-4o-mini"),
             llm=langchain.LLMAdapter(agent_graph),
             tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.1),
         )
@@ -185,16 +219,21 @@ class VoiceAgent(Agent):
         print(f"[LLM]  {new_message.text_content}\n", flush=True)
         await super().on_agent_turn_completed(turn_ctx, new_message)
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Entrypoint
+# ──────────────────────────────────────────────────────────────────────────────
 
 async def entrypoint(ctx: JobContext):
     logger.info("User connected to room: %s", ctx.room.name)
+
     vad = silero.VAD.load(
-        activation_threshold=0.5,    # start speech above this confidence
-        deactivation_threshold=0.35, # end speech below this confidence
-        min_speech_duration=0.1,     # ignore blips shorter than 100ms
-        min_silence_duration=0.8,    # wait 800ms of silence before ending turn
-        prefix_padding_duration=0.3, # keep 300ms before detected speech onset
+        activation_threshold=0.5,     # start speech above this confidence
+        deactivation_threshold=0.35,  # end speech below this confidence
+        min_speech_duration=0.1,      # ignore blips shorter than 100ms
+        min_silence_duration=0.8,     # wait 800ms of silence before ending turn
+        prefix_padding_duration=0.3,  # keep 300ms before detected speech onset
     )
+
     session = AgentSession(
         vad=vad,
         turn_handling={
@@ -205,8 +244,13 @@ async def entrypoint(ctx: JobContext):
             },
         },
     )
+
     await session.start(agent=VoiceAgent(), room=ctx.room)
 
 
+agent_server = AgentServer()
+agent_server.rtc_session(entrypoint, agent_name="voice-agent")
+
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    import asyncio
+    asyncio.run(agent_server.run(devmode=True))
