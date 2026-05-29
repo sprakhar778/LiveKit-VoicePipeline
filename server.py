@@ -28,15 +28,19 @@ def make_token() -> str:
 
 
 def dispatch_agent() -> None:
-    """Explicitly dispatch the agent worker into the room."""
     async def _run():
         async with lkapi.LiveKitAPI(url=LIVEKIT_URL, api_key=API_KEY, api_secret=API_SECRET) as lk:
-            await lk.agent_dispatch.create_dispatch(
-                lkapi.CreateAgentDispatchRequest(agent_name="", room=ROOM_NAME)
-            )
+            try:
+                resp = await lk.room.list_participants(lkapi.ListParticipantsRequest(room=ROOM_NAME))
+                if any(p.kind == lkapi.ParticipantInfo.Kind.AGENT for p in resp.participants):
+                    print(f"Agent already in room, skipping")
+                    return
+            except Exception:
+                pass
+            await lk.agent_dispatch.create_dispatch(lkapi.CreateAgentDispatchRequest(agent_name="", room=ROOM_NAME))
+            print(f"Agent dispatched to room '{ROOM_NAME}'")
     try:
         asyncio.run(_run())
-        print(f"Agent dispatched to room '{ROOM_NAME}'")
     except Exception as e:
         print(f"Dispatch warning: {e}")
 

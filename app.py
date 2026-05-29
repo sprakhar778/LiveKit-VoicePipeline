@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-
+from prompt import PROMPT
 import numpy as np
 from scipy.signal import resample_poly
 
@@ -105,11 +105,7 @@ class SupertonicTTS(tts.TTS):
 class VoiceAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="""
-You are a helpful voice assistant.
-Be friendly and conversational.
-Keep answers short since the user is listening, not reading.
-            """,
+            instructions=PROMPT,
             stt=openai.STT(model="whisper-1"),
             llm=openai.LLM(model="gpt-4o-mini"),
             tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.05),
