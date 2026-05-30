@@ -17,4 +17,5 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
     "livekit-plugins-langchain>=1.5.14",
+    "langsmith>=0.8.6",
 ]

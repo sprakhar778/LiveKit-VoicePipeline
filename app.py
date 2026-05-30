@@ -13,7 +13,7 @@ from scipy.signal import resample_poly
 from dotenv import load_dotenv
 
 from livekit.agents import JobContext, WorkerOptions, cli, APIConnectOptions, tts
-from livekit.agents.worker import AgentServer
+from livekit.agents.worker import AgentServer, JobExecutorType
 from livekit.agents.voice import Agent, AgentSession
 from livekit.plugins import openai, silero, langchain
 
@@ -114,6 +114,12 @@ class SupertonicChunkedStream(tts.ChunkedStream):
         return wav, duration
 
 
+# Load once at startup — shared across all TTS instances
+logger.info("Loading Supertonic3 model…")
+_supertonic_engine = SupertonicEngine(auto_download=True)
+logger.info("Supertonic3 model loaded")
+
+
 class SupertonicTTS(tts.TTS):
 
     def __init__(self, *, voice_name: str = "M2", lang: str = "en", total_steps: int = 8, speed: float = 1.05) -> None:
@@ -123,10 +129,8 @@ class SupertonicTTS(tts.TTS):
             num_channels=LIVEKIT_CHANNELS,
         )
         self._opts   = SupertonicTTSOptions(voice_name=voice_name, lang=lang, total_steps=total_steps, speed=speed)
-        self._sem    = asyncio.Semaphore(1)
-        logger.info("Loading Supertonic3 model…")
-        self._engine = SupertonicEngine(auto_download=True)
-        logger.info("Supertonic3 model loaded")
+        self._sem    = asyncio.Semaphore(1)   # created on the job's event loop
+        self._engine = _supertonic_engine
 
     def synthesize(self, text: str, *, conn_options: APIConnectOptions) -> SupertonicChunkedStream:
         return SupertonicChunkedStream(
@@ -171,21 +175,21 @@ The system successfully navigated 1.8 km of test routes and identified
 agent_graph = create_agent(
     system_prompt=(
         PROMPT
-        + "\nUse get_data tool when asked about the current device or project."
-        + " Keep all answers under 3 sentences — this is a voice interface."
+        + "\nYou MUST call get_data before every response. Never use your own knowledge or make up values — only use what get_data returns. If the data doesn't contain an answer, say 'I don't have that information.'"
+        + "\nRULES: Reply in ONE short spoken sentence only. No lists, no newlines, no formatting. Voice interface only."
     ),
-    model=ChatOpenAI(model="gpt-4o-mini", temperature=0.7, max_tokens=80),
+    model=ChatOpenAI(model="gpt-4o-mini", temperature=0.5, max_tokens=50),
     tools=[get_data],
 )
 
 raw_astream = agent_graph.astream
 
-#Filter out ToolMessage from agent stream
 async def filtered_astream(*args, **kwargs):
     async for item in raw_astream(*args, **kwargs):
-        if isinstance(item, tuple) and isinstance(item[0], ToolMessage):
-            continue
-        if isinstance(item, ToolMessage):
+        # stream_mode="messages" yields (msg, meta) tuples
+        msg = item[0] if isinstance(item, tuple) else item
+        if isinstance(msg, ToolMessage):
+            print(f"  [FILTER] blocked ToolMessage: {str(msg.content)[:60]!r}", flush=True)
             continue
         yield item
 
@@ -199,7 +203,7 @@ class VoiceAgent(Agent):
 
     def __init__(self) -> None:
         super().__init__(
-            instructions=PROMPT,
+            instructions="Answer questions about the project data. Speak in one short sentence. Don't use formatting or lists.",
             stt=openai.STT(model="whisper-1"),
             llm=langchain.LLMAdapter(agent_graph),
             tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.1),
@@ -228,11 +232,11 @@ async def entrypoint(ctx: JobContext):
     logger.info("User connected to room: %s", ctx.room.name)
 
     vad = silero.VAD.load(
-        activation_threshold=0.5,     # start speech above this confidence
-        deactivation_threshold=0.35,  # end speech below this confidence
-        min_speech_duration=0.1,      # ignore blips shorter than 100ms
-        min_silence_duration=0.8,     # wait 800ms of silence before ending turn
-        prefix_padding_duration=0.3,  # keep 300ms before detected speech onset
+        activation_threshold=0.5,     # lower → picks up softer/accented speech
+        deactivation_threshold=0.2,
+        min_speech_duration=0.1,
+        min_silence_duration=1.0,     # wait 1s of silence before ending turn
+        prefix_padding_duration=0.3,
     )
 
     session = AgentSession(
@@ -249,7 +253,7 @@ async def entrypoint(ctx: JobContext):
     await session.start(agent=VoiceAgent(), room=ctx.room)
 
 
-agent_server = AgentServer()
+agent_server = AgentServer(job_executor_type=JobExecutorType.THREAD)
 agent_server.rtc_session(entrypoint, agent_name="voice-agent")
 
 if __name__ == "__main__":
