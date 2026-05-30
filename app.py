@@ -175,7 +175,8 @@ The system successfully navigated 1.8 km of test routes and identified
 agent_graph = create_agent(
     system_prompt=(
         PROMPT
-        + "\nYou MUST call get_data before every response. Never use your own knowledge or make up values — only use what get_data returns. If the data doesn't contain an answer, say 'I don't have that information.'"
+        + "\nTOOL RULE: Call get_data ONLY when the user asks about the specific project, device, metrics, tasks, status, or client. For all other questions (greetings, general knowledge, anything not project-specific) answer directly from your own knowledge."
+        + "\nNever make up project-specific values — those must always come from get_data. If the tool data doesn't contain the answer, say 'I don't have that information.'"
         + "\nRULES: Reply in ONE short spoken sentence only. No lists, no newlines, no formatting. Voice interface only."
     ),
     model=ChatOpenAI(model="gpt-4o-mini", temperature=0.5, max_tokens=50),
@@ -203,7 +204,7 @@ class VoiceAgent(Agent):
 
     def __init__(self) -> None:
         super().__init__(
-            instructions="Answer questions about the project data. Speak in one short sentence. Don't use formatting or lists.",
+            instructions=PROMPT,
             stt=openai.STT(model="whisper-1"),
             llm=langchain.LLMAdapter(agent_graph),
             tts=SupertonicTTS(voice_name="M2", lang="en", total_steps=8, speed=1.1),
