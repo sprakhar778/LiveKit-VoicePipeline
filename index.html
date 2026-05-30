@@ -12,6 +12,39 @@
       font-family: system-ui, sans-serif;
     }
 
+    /* ── Transcript ── */
+    #transcript {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      padding: 20px 16px 100px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .msg {
+      max-width: 70%;
+      padding: 10px 14px;
+      border-radius: 16px;
+      font-size: 14px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #6366f1;
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.agent {
+      align-self: flex-start;
+      background: #1c1c1e;
+      color: #e5e5e7;
+      border: 0.5px solid rgba(255,255,255,0.08);
+      border-bottom-left-radius: 4px;
+    }
+    .msg.agent.partial { opacity: 0.55; font-style: italic; }
+
     /* ── Floating bubble ── */
     #bubble {
       position: fixed;
@@ -28,23 +61,14 @@
     }
     #bubble:hover { transform: scale(1.08); border-color: rgba(255,255,255,0.35); }
     #bubble.listening { border-color: #6366f1; animation: pulse-ring 1.4s ease-out infinite; }
-    #bubble.speaking  { border-color: #34d399; animation: pulse-ring 0.9s ease-out infinite; }
+    #bubble.speaking  { animation: pulse-ring-green 0.9s ease-out infinite; }
 
-    #bubble img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
+    #bubble img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
-    /* ripple ring */
     @keyframes pulse-ring {
       0%   { box-shadow: 0 0 0 0px rgba(99,102,241,0.5); }
       70%  { box-shadow: 0 0 0 10px rgba(99,102,241,0); }
       100% { box-shadow: 0 0 0 0px rgba(99,102,241,0); }
-    }
-    #bubble.speaking {
-      animation: pulse-ring-green 0.9s ease-out infinite;
     }
     @keyframes pulse-ring-green {
       0%   { box-shadow: 0 0 0 0px rgba(52,211,153,0.5); }
@@ -69,7 +93,7 @@
     }
     #popup.open { display: flex; }
 
-#btn-go {
+    #btn-go {
       width: 100%;
       padding: 10px;
       background: #6366f1;
@@ -106,31 +130,12 @@
     #btn-disconnect:hover { color: #f87171; border-color: #f87171; }
 
     #audio-sink { display: none; }
-
-    #debug-log {
-      position: fixed;
-      top: 12px;
-      left: 12px;
-      right: 12px;
-      background: #111;
-      border: 1px solid #333;
-      border-radius: 8px;
-      padding: 10px 14px;
-      font-family: monospace;
-      font-size: 12px;
-      color: #aaa;
-      max-height: 180px;
-      overflow-y: auto;
-      z-index: 9999;
-    }
-    #debug-log div { margin: 2px 0; }
-    #debug-log .ok  { color: #34d399; }
-    #debug-log .err { color: #f87171; }
   </style>
 </head>
 <body>
 
-  <!-- Replace src with any face image URL, or a local path -->
+  <div id="transcript"></div>
+
   <div id="bubble" title="Talk to agent">
     <img src="https://api.dicebear.com/7.x/micah/svg?seed=agent&backgroundColor=4f46e5" alt="Agent" />
   </div>
@@ -141,62 +146,64 @@
     <button id="btn-disconnect">Disconnect</button>
   </div>
 
-  <div id="debug-log"></div>
   <div id="audio-sink"></div>
 
 <script>
-function dbg(msg, cls = "") {
-  const el = document.getElementById("debug-log");
-  const line = document.createElement("div");
-  if (cls) line.className = cls;
-  line.textContent = new Date().toLocaleTimeString() + " " + msg;
-  el.appendChild(line);
-  el.scrollTop = el.scrollHeight;
-  console.log(msg);
-}
-
-if (typeof LivekitClient === "undefined") {
-  dbg("ERROR: LivekitClient not loaded — check network/CDN", "err");
-} else {
-  dbg("LivekitClient loaded ✓", "ok");
-}
-
 const { Room, RoomEvent, Track, RemoteParticipant } = LivekitClient;
 
-const bubble    = document.getElementById("bubble");
-const popup     = document.getElementById("popup");
-const btnGo     = document.getElementById("btn-go");
-const btnDisco  = document.getElementById("btn-disconnect");
-const statusEl  = document.getElementById("status-text");
-const audioSink = document.getElementById("audio-sink");
+const bubble      = document.getElementById("bubble");
+const popup       = document.getElementById("popup");
+const btnGo       = document.getElementById("btn-go");
+const btnDisco    = document.getElementById("btn-disconnect");
+const statusEl    = document.getElementById("status-text");
+const audioSink   = document.getElementById("audio-sink");
+const transcript  = document.getElementById("transcript");
 
 let room = null;
 let connected = false;
-let tUserStopped = 0;  // timestamp when local user last stopped speaking
+let tUserStopped = 0;
 
-// ── Toggle popup on bubble click ────────────────────────────────────────────
+// Partial message elements (updated in real-time, replaced when final)
+const partials = { user: null, agent: null };
+
+function addMessage(role, text, isFinal) {
+  if (!isFinal) {
+    // Update or create partial bubble
+    if (!partials[role]) {
+      partials[role] = document.createElement("div");
+      partials[role].className = `msg ${role} partial`;
+      transcript.appendChild(partials[role]);
+    }
+    partials[role].textContent = text;
+    transcript.scrollTop = transcript.scrollHeight;
+    return;
+  }
+  // Finalize — replace partial or create new
+  const el = partials[role] || document.createElement("div");
+  el.className = `msg ${role}`;
+  el.textContent = text;
+  if (!partials[role]) transcript.appendChild(el);
+  partials[role] = null;
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
 bubble.addEventListener("click", () => {
   if (connected) return;
   popup.classList.toggle("open");
 });
 
-// ── Connect ──────────────────────────────────────────────────────────────────
 btnGo.addEventListener("click", async () => {
-  // Unlock audio playback — must happen inside a user gesture
   try { await new AudioContext().resume(); } catch(_) {}
 
   btnGo.disabled = true;
   setStatus("Fetching credentials…");
-  dbg("Fetching /token…");
 
   let url, token;
   try {
     const resp = await fetch("/token");
     if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
     ({ url, token } = await resp.json());
-    dbg("Token OK, URL: " + url, "ok");
   } catch (e) {
-    dbg("Token fetch failed: " + e.message, "err");
     setStatus("Could not get token: " + e.message, "error");
     btnGo.disabled = false;
     return;
@@ -205,36 +212,38 @@ btnGo.addEventListener("click", async () => {
   setStatus("Connecting…");
   room = new Room();
 
+  // ── Transcription (STT + TTS text) ─────────────────────────────────────────
+  room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+    const isUser = participant === room.localParticipant;
+    const role   = isUser ? "user" : "agent";
+    for (const seg of segments) {
+      addMessage(role, seg.text, seg.isFinal);
+    }
+  });
+
+  // ── Speaking state → bubble color ──────────────────────────────────────────
   room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
     const localTalking = speakers.some(s => s === room.localParticipant);
     const agentTalking = speakers.some(s => s instanceof RemoteParticipant);
 
-    if (!localTalking && tUserStopped === 0) {
-      tUserStopped = performance.now();
-    }
-    if (localTalking) {
-      tUserStopped = 0;  // reset if user speaks again
-    }
+    if (!localTalking && tUserStopped === 0) tUserStopped = performance.now();
+    if (localTalking) tUserStopped = 0;
 
     bubble.className = agentTalking ? "speaking" : (connected ? "listening" : "");
   });
 
-  room.on(RoomEvent.ParticipantConnected, (p) => {
-    dbg("Participant joined: " + p.identity, "ok");
-  });
-
+  // ── Audio playback ──────────────────────────────────────────────────────────
   room.on(RoomEvent.TrackSubscribed, (track, pub, participant) => {
-    dbg("Track subscribed: " + track.kind + " from " + participant.identity, "ok");
     if (track.kind === Track.Kind.Audio) {
       if (tUserStopped > 0) {
         const rtt = ((performance.now() - tUserStopped) / 1000).toFixed(2);
-        dbg(`[TIMER] End-to-end latency: ${rtt}s`, "ok");
+        console.log(`[TIMER] End-to-end latency: ${rtt}s`);
         tUserStopped = 0;
       }
       const el = track.attach();
       el.autoplay = true;
       audioSink.appendChild(el);
-      el.play().catch((e) => dbg("play() blocked: " + e.message, "err"));
+      el.play().catch(() => {});
     }
   });
 
@@ -246,34 +255,27 @@ btnGo.addEventListener("click", async () => {
     popup.classList.add("open");
     btnGo.disabled = false;
     btnDisco.style.display = "none";
-    dbg("Room disconnected");
     setStatus("Disconnected — click to reconnect");
   });
 
   try {
-    dbg("Connecting to room…");
     await room.connect(url, token);
-    dbg("Room connected ✓ — " + room.name, "ok");
     connected = true;
     popup.classList.remove("open");
     bubble.className = "listening";
     btnDisco.style.display = "block";
     setStatus("Enabling microphone…");
-    dbg("Requesting mic…");
     if (!navigator.mediaDevices) {
-      throw new Error("Mic blocked — open via http://localhost:" + location.port + " (not IP address). Browsers require HTTPS or localhost for microphone.");
+      throw new Error("Mic blocked — open via http://localhost:" + location.port);
     }
     await room.localParticipant.setMicrophoneEnabled(true);
-    dbg("Mic enabled ✓", "ok");
     setStatus("Connected — speak now", "active");
   } catch (e) {
-    dbg("Connect error: " + e.message, "err");
     setStatus("Failed: " + e.message, "error");
     btnGo.disabled = false;
   }
 });
 
-// ── Disconnect ───────────────────────────────────────────────────────────────
 btnDisco.addEventListener("click", async () => {
   if (room) await room.disconnect();
 });

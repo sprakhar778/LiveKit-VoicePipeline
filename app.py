@@ -178,17 +178,18 @@ agent_graph = create_agent(
     tools=[get_data],
 )
 
-_raw_astream = agent_graph.astream
+raw_astream = agent_graph.astream
 
-async def _filtered_astream(*args, **kwargs):
-    async for item in _raw_astream(*args, **kwargs):
+#Filter out ToolMessage from agent stream
+async def filtered_astream(*args, **kwargs):
+    async for item in raw_astream(*args, **kwargs):
         if isinstance(item, tuple) and isinstance(item[0], ToolMessage):
             continue
         if isinstance(item, ToolMessage):
             continue
         yield item
 
-agent_graph.astream = _filtered_astream
+agent_graph.astream = filtered_astream
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Voice agent

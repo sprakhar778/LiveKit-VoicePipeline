@@ -33,6 +33,8 @@ cp .env.example .env
 
 `.env` needs:
 ```
+# uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+
 LIVEKIT_URL=wss://your-project.livekit.cloud
 LIVEKIT_API_KEY=...
 LIVEKIT_API_SECRET=...
